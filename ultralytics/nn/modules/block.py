@@ -58,6 +58,7 @@ __all__ = (
     "EnhancedBottleneck",
     "ChannelShuffle",
     "AdaptiveFeatureFusion",
+    "AerialDetectionBlock",
     "EnhancedC2f",
     "EnhancedC2fConfig",
     "LightAttn",
@@ -176,39 +177,48 @@ class SpatialAttention(nn.Module):
 
 
 class EnhancedBottleneck(nn.Module):
-    """An enhanced bottleneck block that now uses SpatialAttention."""
+    """Enhanced bottleneck optimized for aerial detection with CBAM and multi-scale features."""
 
     def __init__(self, c1: int, c2: int, shortcut: bool = True, g: int = 1, e: float = 0.5):
         super().__init__()
         c_ = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, c_, 3, 1)
-        self.cv2 = Conv(c_, c2, 3, 1, g=g)
+        self.cv1 = Conv(c1, c_, 1, 1)  # 1x1 conv for efficiency
+        self.cv2 = Conv(c_, c_, 3, 1, g=g)  # 3x3 depthwise
+        self.cv3 = Conv(c_, c2, 1, 1)  # 1x1 conv to output channels
         self.add = shortcut and c1 == c2
         
-        # This line now uses your SpatialAttention module
-        self.attn = SpatialAttention()
+        # Multi-scale feature extraction for aerial view
+        self.multi_scale = nn.ModuleList([
+            nn.Conv2d(c_, c_, 3, 1, 1),  # 3x3 for medium objects
+            nn.Conv2d(c_, c_, 5, 1, 2),  # 5x5 for larger context
+            nn.Conv2d(c_, c_, 1, 1, 0),  # 1x1 for small objects
+        ])
+        
+        # CBAM attention for both channel and spatial attention
+        self.cbam = CBAM(c2)
+        
+        # Lightweight feature fusion
+        self.fusion_conv = Conv(c_ * 3, c_, 1, 1)
 
     def forward(self, x):
-        """Defines the forward pass for the bottleneck block."""
-        out = self.cv2(self.cv1(x))
-        out = self.attn(out) # Apply spatial attention
-        return x + out if self.add else out
-    
-# class EnhancedBottleneck(nn.Module): #CBAM
-#     """An enhanced bottleneck block that now uses CBAM."""
-#     def __init__(self, c1: int, c2: int, shortcut: bool = True, g: int = 1, e: float = 0.5):
-#         super().__init__()
-#         c_ = int(c2 * e)  # hidden channels
-#         self.cv1 = Conv(c1, c_, 3, 1)
-#         self.cv2 = Conv(c_, c2, 3, 1, g=g)
-#         self.add = shortcut and c1 == c2
-#         # --- MODIFICATION ---
-#         # Replaced SpatialAttention with the more advanced CBAM module.
-#         self.attn = CBAM(c2)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.cv2(self.cv1(x))
-        out = self.attn(out) # Apply CBAM attention
+        """Forward pass with multi-scale features and CBAM attention."""
+        # Initial feature extraction
+        feat = self.cv1(x)
+        
+        # Multi-scale feature extraction
+        ms_features = []
+        for conv in self.multi_scale:
+            ms_features.append(conv(feat))
+        
+        # Fuse multi-scale features
+        fused = self.fusion_conv(torch.cat(ms_features, dim=1))
+        
+        # Final convolution
+        out = self.cv3(fused)
+        
+        # Apply CBAM attention
+        out = self.cbam(out)
+        
         return x + out if self.add else out
 
 class ChannelShuffle(nn.Module):
@@ -267,20 +277,108 @@ class AdaptiveFeatureFusion(nn.Module):
         return torch.cat(weighted_features, dim=1)
 
 
+class AerialDetectionBlock(nn.Module):
+    """Specialized block for aerial object detection with scale-aware attention."""
+    
+    def __init__(self, c1: int, c2: int, reduction: int = 16):
+        super().__init__()
+        self.c1 = c1
+        self.c2 = c2
+        
+        # Scale-aware convolutions for different object sizes in aerial view
+        self.small_scale = nn.Sequential(
+            nn.Conv2d(c1, c2//3, 1, 1, 0),  # 1x1 for very small objects
+            nn.BatchNorm2d(c2//3),
+            nn.SiLU(inplace=True)
+        )
+        
+        self.medium_scale = nn.Sequential(
+            nn.Conv2d(c1, c2//3, 3, 1, 1),  # 3x3 for medium objects
+            nn.BatchNorm2d(c2//3),
+            nn.SiLU(inplace=True)
+        )
+        
+        self.large_scale = nn.Sequential(
+            nn.Conv2d(c1, c2//3, 5, 1, 2),  # 5x5 for larger context
+            nn.BatchNorm2d(c2//3),
+            nn.SiLU(inplace=True)
+        )
+        
+        # Adaptive pooling for different altitudes/scales
+        self.adaptive_pools = nn.ModuleList([
+            nn.AdaptiveAvgPool2d((1, 1)),   # Global context
+            nn.AdaptiveAvgPool2d((2, 2)),   # Regional context
+            nn.AdaptiveAvgPool2d((4, 4)),   # Local context
+        ])
+        
+        # Scale attention mechanism
+        self.scale_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(c2, c2 // reduction, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c2 // reduction, c2, 1),
+            nn.Sigmoid()
+        )
+        
+        # Position encoding for aerial view geometry
+        self.pos_encoding = nn.Parameter(torch.randn(1, c2, 1, 1) * 0.02)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass with scale-aware processing."""
+        B, C, H, W = x.shape
+        
+        # Multi-scale feature extraction
+        small_feat = self.small_scale(x)
+        medium_feat = self.medium_scale(x)
+        large_feat = self.large_scale(x)
+        
+        # Concatenate multi-scale features
+        multi_scale = torch.cat([small_feat, medium_feat, large_feat], dim=1)
+        
+        # Apply scale attention
+        scale_weight = self.scale_attention(multi_scale)
+        attended_feat = multi_scale * scale_weight
+        
+        # Add positional encoding for aerial geometry
+        attended_feat = attended_feat + self.pos_encoding
+        
+        return attended_feat
+
+
 class EnhancedC2f(nn.Module):
-    """The C2f block using our new EnhancedBottleneck with CBAM."""
+    """Enhanced C2f block optimized for aerial detection with efficient attention."""
+    
     def __init__(self, c1: int, c2: int, n: int = 1, shortcut: bool = False, g: int = 1, e: float = 0.5):
         super().__init__()
         self.c = int(c2 * e)
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
         self.cv2 = Conv((2 + n) * self.c, c2, 1)
-        # It now creates a series of bottlenecks with CBAM Attention
+        
+        # Use our enhanced bottlenecks
         self.m = nn.ModuleList(EnhancedBottleneck(self.c, self.c, shortcut, g, e=1.0) for _ in range(n))
+        
+        # Add lightweight attention at the end
+        self.channel_attention = SEModule(c2, c2, reduction=16)
+        
+        # Dropout for regularization (helps with overfitting)
+        self.dropout = nn.Dropout2d(0.1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass with enhanced features and attention."""
         y = list(self.cv1(x).chunk(2, 1))
         y.extend(m(y[-1]) for m in self.m)
-        return self.cv2(torch.cat(y, 1))
+        
+        # Concatenate and process
+        out = self.cv2(torch.cat(y, 1))
+        
+        # Apply channel attention
+        out = self.channel_attention(out)
+        
+        # Apply dropout during training
+        if self.training:
+            out = self.dropout(out)
+            
+        return out
 
 
 class FullEnhancementBlock(nn.Module):
