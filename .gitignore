@@ -5,7 +5,9 @@ __pycache__/
 modifying_yolo
 # C extensions
 *.so
-
+GTSDB---German-Traffic-Sign-Detection-Benchmark-3
+YOLOv8_Comparison
+training_comparison.csv
 # Distribution / packaging
 .Python
 build/
