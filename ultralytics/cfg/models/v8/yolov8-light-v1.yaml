@@ -2,7 +2,7 @@
 # Uses LightAttn with configurable attention bottleneck for efficient channel attention
 
 # Parameters
-nc: 80  # number of classes
+nc: 10  # number of classes
 scales:  # model compound scaling constants
   # [depth, width, max_channels]
   n: [0.33, 0.25, 1024]  # For yolov8n-light-v1

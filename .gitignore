@@ -6,6 +6,7 @@ modifying_yolo
 # C extensions
 *.so
 GTSDB---German-Traffic-Sign-Detection-Benchmark-3
+results
 YOLOv8_Comparison
 training_comparison.csv
 # Distribution / packaging

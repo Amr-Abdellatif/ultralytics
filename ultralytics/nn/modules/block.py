@@ -64,6 +64,7 @@ __all__ = (
     "LightAttn",
     "LightAttnMemOpt",
     "LightAttnFinal",
+    "LightLocalAttn",
 )
 
 
@@ -579,6 +580,63 @@ class LightAttnFinal(nn.Module):
         enhanced_features = concatenated * attn_map
         
         return self.cv2(enhanced_features)
+
+
+class LightLocalAttn(nn.Module):
+    """
+    LightLocalAttn (Thesis Contribution): 
+    Replaces global pooling with 'Local Spatial Context' to prevent feature squashing.
+    Perfect for small object detection (VisDrone).
+    """
+    
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5, k_attn=7):
+        super().__init__()
+        self.c = int(c2 * e)
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)
+        
+        # 1. THE ATTENTION MECHANISM (No Global Pooling!)
+        # We replace the GAP + Linear layers with a Spatial-Depthwise layer.
+        self.attn = nn.Sequential(
+            # A: Depthwise Conv (Spatial Context) - "Where is the object?"
+            # k=7 gives a nice local receptive field (7x7 pixels)
+            nn.Conv2d(self.c, self.c, k_attn, 1, k_attn//2, groups=self.c, bias=False),
+            nn.BatchNorm2d(self.c),
+            
+            # B: Pointwise Conv (Channel Mixing) - "What is the object?"
+            nn.Conv2d(self.c, self.c, 1, 1, 0, bias=False),
+            
+            # C: Activation
+            nn.Sigmoid()
+        )
+        
+        # Standard Bottlenecks
+        self.m = nn.ModuleList(
+            self._make_bottleneck(self.c, self.c, shortcut, g) for _ in range(n)
+        )
+    
+    def _make_bottleneck(self, c1, c2, shortcut, g):
+        # Standard lightweight bottleneck
+        return nn.Sequential(
+            Conv(c1, c2, 1, 1),
+            Conv(c2, c2, 3, 1, g=g),
+            Conv(c2, c2, 1, 1, act=False)
+        )
+    
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        
+        for m in self.m:
+            feat = m(y[-1])
+            
+            # Apply Local Attention (Preserves HxW dimensions!)
+            # The mask is HxW, so it re-weights specific pixels, not the whole image.
+            attn_map = self.attn(feat)
+            
+            feat = feat * attn_map
+            y.append(feat)
+            
+        return self.cv2(torch.cat(y, 1))
 
 
 ########################################################################

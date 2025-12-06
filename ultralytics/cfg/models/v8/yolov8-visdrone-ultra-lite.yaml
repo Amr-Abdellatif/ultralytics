@@ -2,7 +2,7 @@
 # Uses selective enhancement strategy that proved successful
 
 # Parameters
-nc: 12  # VisDrone classes
+nc: 10  # VisDrone classes
 scales:  # model compound scaling constants
   # [depth, width, max_channels]
   n: [0.33, 0.25, 1024]

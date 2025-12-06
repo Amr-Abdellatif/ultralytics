@@ -71,6 +71,7 @@ from .block import (
     LightAttn,
     LightAttnMemOpt,
     LightAttnFinal,
+    LightLocalAttn,
 )
 from .conv import (
     CBAM,
@@ -202,4 +203,5 @@ __all__ = (
     "LightAttn",
     "LightAttnMemOpt",
     "LightAttnFinal",
+    "LightLocalAttn",
 )
